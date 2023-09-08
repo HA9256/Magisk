@@ -16,12 +16,6 @@
 [submodule "xz"]
 	path = native/src/external/xz
 	url = https://github.com/xz-mirror/xz.git
-[submodule "nanopb"]
-	path = native/src/external/nanopb
-	url = https://github.com/nanopb/nanopb.git
-[submodule "mincrypt"]
-	path = native/src/external/mincrypt
-	url = https://github.com/topjohnwu/mincrypt.git
 [submodule "pcre"]
 	path = native/src/external/pcre
 	url = https://android.googlesource.com/platform/external/pcre
@@ -40,6 +34,12 @@
 [submodule "cxx-rs"]
 	path = native/src/external/cxx-rs
 	url = https://github.com/topjohnwu/cxx.git
+[submodule "lsplt"]
+	path = native/src/external/lsplt
+	url = https://github.com/LSPosed/LSPlt.git
+[submodule "system_properties"]
+	path = native/src/external/system_properties
+	url = https://github.com/topjohnwu/system_properties.git
 [submodule "termux-elf-cleaner"]
 	path = tools/termux-elf-cleaner
 	url = https://github.com/termux/termux-elf-cleaner.git

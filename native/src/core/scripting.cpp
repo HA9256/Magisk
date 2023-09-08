@@ -159,12 +159,12 @@ rm -f $APK
 )EOF";
 
 void install_apk(const char *apk) {
-    setfilecon(apk, "u:object_r:" SEPOL_FILE_TYPE ":s0");
+    setfilecon(apk, MAGISK_FILE_CON);
     exec_t exec {
         .fork = fork_no_orphan
     };
     char cmds[sizeof(install_script) + 4096];
-    snprintf(cmds, sizeof(cmds), install_script, apk, JAVA_PACKAGE_NAME);
+    ssprintf(cmds, sizeof(cmds), install_script, apk, JAVA_PACKAGE_NAME);
     exec_command_sync(exec, "/system/bin/sh", "-c", cmds);
 }
 
@@ -179,7 +179,7 @@ void uninstall_pkg(const char *pkg) {
         .fork = fork_no_orphan
     };
     char cmds[sizeof(uninstall_script) + 256];
-    snprintf(cmds, sizeof(cmds), uninstall_script, pkg);
+    ssprintf(cmds, sizeof(cmds), uninstall_script, pkg);
     exec_command_sync(exec, "/system/bin/sh", "-c", cmds);
 }
 
@@ -195,7 +195,7 @@ void clear_pkg(const char *pkg, int user_id) {
         .fork = fork_no_orphan
     };
     char cmds[sizeof(clear_script) + 288];
-    snprintf(cmds, sizeof(cmds), clear_script, pkg, user_id);
+    ssprintf(cmds, sizeof(cmds), clear_script, pkg, user_id);
     exec_command_sync(exec, "/system/bin/sh", "-c", cmds);
 }
 

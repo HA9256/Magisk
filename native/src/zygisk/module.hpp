@@ -10,14 +10,19 @@ struct ZygiskModule;
 struct AppSpecializeArgs_v1;
 using  AppSpecializeArgs_v2 = AppSpecializeArgs_v1;
 struct AppSpecializeArgs_v3;
+using  AppSpecializeArgs_v4 = AppSpecializeArgs_v3;
 
 struct module_abi_v1;
 using  module_abi_v2 = module_abi_v1;
 using  module_abi_v3 = module_abi_v1;
+using  module_abi_v4 = module_abi_v1;
 
 struct api_abi_v1;
 struct api_abi_v2;
 using  api_abi_v3 = api_abi_v2;
+struct api_abi_v4;
+
+union ApiTable;
 
 struct AppSpecializeArgs_v3 {
     jint &uid;
@@ -105,31 +110,49 @@ enum : uint32_t {
     PROCESS_GRANTED_ROOT = zygisk::StateFlag::PROCESS_GRANTED_ROOT,
     PROCESS_ON_DENYLIST = zygisk::StateFlag::PROCESS_ON_DENYLIST,
 
+    PROCESS_IS_SYS_UI = (1u << 29),
     DENYLIST_ENFORCING = (1u << 30),
     PROCESS_IS_MAGISK_APP = (1u << 31),
 
     UNMOUNT_MASK = (PROCESS_ON_DENYLIST | DENYLIST_ENFORCING),
-    PRIVATE_MASK = (DENYLIST_ENFORCING | PROCESS_IS_MAGISK_APP)
+    PRIVATE_MASK = (PROCESS_IS_SYS_UI | DENYLIST_ENFORCING | PROCESS_IS_MAGISK_APP)
 };
 
 struct api_abi_base {
     ZygiskModule *impl;
-    bool (*registerModule)(api_abi_base *, long *);
+    bool (*registerModule)(ApiTable *, long *);
 };
 
 struct api_abi_v1 : public api_abi_base {
-    void (*hookJniNativeMethods)(JNIEnv *, const char *, JNINativeMethod *, int);
-    void (*pltHookRegister)(const char *, const char *, void *, void **);
-    void (*pltHookExclude)(const char *, const char *);
-    bool (*pltHookCommit)();
-
-    int (*connectCompanion)(ZygiskModule *);
-    void (*setOption)(ZygiskModule *, zygisk::Option);
+    /* 0 */ void (*hookJniNativeMethods)(JNIEnv *, const char *, JNINativeMethod *, int);
+    /* 1 */ void (*pltHookRegister)(const char *, const char *, void *, void **);
+    /* 2 */ void (*pltHookExclude)(const char *, const char *);
+    /* 3 */ bool (*pltHookCommit)();
+    /* 4 */ int (*connectCompanion)(ZygiskModule *);
+    /* 5 */ void (*setOption)(ZygiskModule *, zygisk::Option);
 };
 
 struct api_abi_v2 : public api_abi_v1 {
-    int (*getModuleDir)(ZygiskModule *);
-    uint32_t (*getFlags)(ZygiskModule *);
+    /* 6 */ int (*getModuleDir)(ZygiskModule *);
+    /* 7 */ uint32_t (*getFlags)(ZygiskModule *);
+};
+
+struct api_abi_v4 : public api_abi_base {
+    /* 0 */ void (*hookJniNativeMethods)(JNIEnv *, const char *, JNINativeMethod *, int);
+    /* 1 */ void (*pltHookRegister)(dev_t, ino_t, const char *, void *, void **);
+    /* 2 */ bool (*exemptFd)(int);
+    /* 3 */ bool (*pltHookCommit)();
+    /* 4 */ int (*connectCompanion)(ZygiskModule *);
+    /* 5 */ void (*setOption)(ZygiskModule *, zygisk::Option);
+    /* 6 */ int (*getModuleDir)(ZygiskModule *);
+    /* 7 */ uint32_t (*getFlags)(ZygiskModule *);
+};
+
+union ApiTable {
+    api_abi_base base;
+    api_abi_v1 v1;
+    api_abi_v2 v2;
+    api_abi_v4 v4;
 };
 
 #define call_app(method)               \
@@ -141,6 +164,7 @@ case 2: {                              \
     break;                             \
 }                                      \
 case 3:                                \
+case 4:                                \
     mod.v1->method(mod.v1->impl, args);\
     break;                             \
 }
@@ -163,6 +187,7 @@ struct ZygiskModule {
         mod.v1->postServerSpecialize(mod.v1->impl, args);
     }
 
+    bool valid() const;
     int connectCompanion() const;
     int getModuleDir() const;
     void setOption(zygisk::Option opt);
@@ -173,7 +198,7 @@ struct ZygiskModule {
 
     ZygiskModule(int id, void *handle, void *entry);
 
-    static bool RegisterModuleImpl(api_abi_base *api, long *module);
+    static bool RegisterModuleImpl(ApiTable *api, long *module);
 
 private:
     const int id;
@@ -185,11 +210,7 @@ private:
         void (* const fn)(void *, void *);
     } entry;
 
-    union {
-        api_abi_base base;
-        api_abi_v1 v1;
-        api_abi_v2 v2;
-    } api;
+    ApiTable api;
 
     union {
         long *api_version;

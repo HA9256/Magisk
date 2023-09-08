@@ -10,8 +10,6 @@
 
 #include "init.hpp"
 
-#include <init-rs.cpp>
-
 using namespace std;
 
 bool unxz(int fd, const uint8_t *buf, size_t size) {
@@ -61,10 +59,6 @@ void restore_ramdisk_init() {
     }
 }
 
-int dump_manager(const char *path, mode_t mode) {
-    return dump_bin(manager_xz, sizeof(manager_xz), path, mode);
-}
-
 int dump_preload(const char *path, mode_t mode) {
     return dump_bin(init_ld_xz, sizeof(init_ld_xz), path, mode);
 }
@@ -87,12 +81,6 @@ int main(int argc, char *argv[]) {
     if (name == "magisk"sv)
         return magisk_proxy_main(argc, argv);
 
-    if (argc > 1 && argv[1] == "-x"sv) {
-        if (argc > 2 && argv[2] == "manager"sv)
-            return dump_manager(argv[3], 0644);
-        return 1;
-    }
-
     if (getpid() != 1)
         return 1;
 
@@ -100,6 +88,7 @@ int main(int argc, char *argv[]) {
     BootConfig config{};
 
     if (argc > 1 && argv[1] == "selinux_setup"sv) {
+        rust::setup_klog();
         init = new SecondStageInit(argv);
     } else {
         // This will also mount /sys and /proc

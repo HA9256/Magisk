@@ -3,28 +3,19 @@
 #include <string>
 #include <vector>
 
+#include "core-rs.hpp"
+#include "resetprop/resetprop.hpp"
+
 extern bool RECOVERY_MODE;
-extern int DAEMON_STATE;
 extern std::atomic<ino_t> pkg_xml_ino;
 
-// Daemon state
-enum : int {
-    STATE_NONE,
-    STATE_POST_FS_DATA,
-    STATE_POST_FS_DATA_DONE,
-    STATE_LATE_START_DONE,
-    STATE_BOOT_COMPLETE
-};
-
+std::string find_preinit_device();
 void unlock_blocks();
 void reboot();
-void start_log_daemon();
-void setup_logfile(bool reset);
-std::string read_certificate(int fd, int version = -1);
 
 // Module stuffs
 void handle_modules();
-void magic_mount();
+void load_modules();
 void disable_modules();
 void remove_modules();
 void exec_module_scripts(const char *stage);

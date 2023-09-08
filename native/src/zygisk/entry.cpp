@@ -34,26 +34,14 @@ static void sanitize_environ() {
     prctl(PR_SET_MM, PR_SET_MM_ENV_END, cur, 0, 0);
 }
 
-[[gnu::destructor]] [[maybe_unused]]
-static void zygisk_cleanup_wait() {
-    if (self_handle) {
-        // Wait 10us to make sure none of our code is executing
-        timespec ts = { .tv_sec = 0, .tv_nsec = 10000L };
-        nanosleep(&ts, nullptr);
-    }
-}
-
-static void *unload_first_stage(void *) {
-    // Wait 10us to make sure 1st stage is done
-    timespec ts = { .tv_sec = 0, .tv_nsec = 10000L };
-    nanosleep(&ts, nullptr);
+extern "C" void unload_first_stage() {
+    ZLOGD("unloading first stage\n");
     unmap_all(HIJACK_BIN);
     xumount2(HIJACK_BIN, MNT_DETACH);
-    return nullptr;
 }
 
 extern "C" void zygisk_inject_entry(void *handle) {
-    zygisk_logging();
+    rust::zygisk_entry();
     ZLOGD("load success\n");
 
     char *ld = getenv("LD_PRELOAD");
@@ -70,12 +58,11 @@ extern "C" void zygisk_inject_entry(void *handle) {
     unsetenv(MAGISKTMP_ENV);
     sanitize_environ();
     hook_functions();
-    new_daemon_thread(&unload_first_stage, nullptr);
 }
 
 // The following code runs in zygote/app process
 
-extern "C" void zygisk_log_write(int prio, const char *msg, int len) {
+extern "C" int zygisk_fetch_logd() {
     // If we don't have the log pipe set, request magiskd for it. This could actually happen
     // multiple times in the zygote daemon (parent process) because we had to close this
     // file descriptor to prevent crashing.
@@ -90,37 +77,18 @@ extern "C" void zygisk_log_write(int prio, const char *msg, int len) {
     // add this FD into fds_to_ignore to pass the check. For other cases, we accomplish this by
     // hooking __android_log_close and closing it at the same time as the rest of logging FDs.
 
-    if (logd_fd < 0) {
-        android_logging();
-        if (int fd = zygisk_request(ZygiskRequest::GET_LOG_PIPE); fd >= 0) {
-            int log_pipe = -1;
-            if (read_int(fd) == 0) {
-                log_pipe = recv_fd(fd);
-            }
-            close(fd);
-            if (log_pipe >= 0) {
-                // Only re-enable zygisk logging if possible
-                logd_fd = log_pipe;
-                zygisk_logging();
-            }
-        } else {
-            return;
+    if (int fd = zygisk_request(ZygiskRequest::GET_LOG_PIPE); fd >= 0) {
+        int log_pipe = -1;
+        if (read_int(fd) == 0) {
+            log_pipe = recv_fd(fd);
+        }
+        close(fd);
+        if (log_pipe >= 0) {
+            return log_pipe;
         }
     }
 
-    // Block SIGPIPE
-    sigset_t mask;
-    sigset_t orig_mask;
-    sigemptyset(&mask);
-    sigaddset(&mask, SIGPIPE);
-    pthread_sigmask(SIG_BLOCK, &mask, &orig_mask);
-
-    magisk_log_write(prio, msg, len);
-
-    // Consume SIGPIPE if exists, then restore mask
-    timespec ts{};
-    sigtimedwait(&mask, nullptr, &ts);
-    pthread_sigmask(SIG_SETMASK, &orig_mask, nullptr);
+    return -1;
 }
 
 static inline bool should_load_modules(uint32_t flags) {
@@ -161,8 +129,10 @@ static vector<int> get_module_fds(bool is_64_bit) {
 }
 
 static bool get_exe(int pid, char *buf, size_t sz) {
-    snprintf(buf, sz, "/proc/%d/exe", pid);
-    return xreadlink(buf, buf, sz) > 0;
+    char exe[128];
+    if (ssprintf(exe, sizeof(exe), "/proc/%d/exe", pid) < 0)
+        return false;
+    return xreadlink(exe, buf, sz) > 0;
 }
 
 static pthread_mutex_t zygiskd_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -191,7 +161,7 @@ static void connect_companion(int client, bool is_64_bit) {
             // This fd has to survive exec
             fcntl(fds[1], F_SETFD, 0);
             char buf[16];
-            snprintf(buf, sizeof(buf), "%d", fds[1]);
+            ssprintf(buf, sizeof(buf), "%d", fds[1]);
             execl(exe.data(), "", "zygisk", "companion", buf, (char *) nullptr);
             exit(-1);
         }
@@ -222,7 +192,20 @@ static void setup_files(int client, const sock_cred *cred) {
         return;
     }
 
+    // Hijack some binary in /system/bin to host loader
+    const char *hbin;
+    string mbin;
+    int app_fd;
     bool is_64_bit = str_ends(buf, "64");
+    if (is_64_bit) {
+        hbin = HIJACK_BIN64;
+        mbin = MAGISKTMP + "/" ZYGISKBIN "/loader64.so";
+        app_fd = app_process_64;
+    } else {
+        hbin = HIJACK_BIN32;
+        mbin = MAGISKTMP + "/" ZYGISKBIN "/loader32.so";
+        app_fd = app_process_32;
+    }
 
     if (!zygote_started) {
         // First zygote launch, record time
@@ -235,6 +218,7 @@ static void setup_files(int client, const sock_cred *cred) {
         close(zygiskd_sockets[1]);
         zygiskd_sockets[0] = -1;
         zygiskd_sockets[1] = -1;
+        xumount2(hbin, MNT_DETACH);
     }
     ++zygote_start_count;
 
@@ -258,26 +242,12 @@ static void setup_files(int client, const sock_cred *cred) {
     // Ack
     write_int(client, 0);
 
-    // Hijack some binary in /system/bin to host loader
-    const char *hbin;
-    string mbin;
-    int app_fd;
-    if (is_64_bit) {
-        hbin = HIJACK_BIN64;
-        mbin = MAGISKTMP + "/" ZYGISKBIN "/loader64.so";
-        app_fd = app_process_64;
-    } else {
-        hbin = HIJACK_BIN32;
-        mbin = MAGISKTMP + "/" ZYGISKBIN "/loader32.so";
-        app_fd = app_process_32;
-    }
-
     // Receive and bind mount loader
     int ld_fd = xopen(mbin.data(), O_WRONLY | O_TRUNC | O_CREAT | O_CLOEXEC, 0755);
     string ld_data = read_string(client);
     xwrite(ld_fd, ld_data.data(), ld_data.size());
     close(ld_fd);
-    setfilecon(mbin.data(), "u:object_r:" SEPOL_FILE_TYPE ":s0");
+    setfilecon(mbin.data(), MAGISK_FILE_CON);
     xmount(mbin.data(), hbin, nullptr, MS_BIND, nullptr);
 
     send_fd(client, app_fd);
@@ -340,7 +310,7 @@ static void get_process_info(int client, const sock_cred *cred) {
         if (!as_const(bits)[id]) {
             // Either not a zygisk module, or incompatible
             char buf[4096];
-            snprintf(buf, sizeof(buf), MODULEROOT "/%s/zygisk",
+            ssprintf(buf, sizeof(buf), MODULEROOT "/%s/zygisk",
                 module_list->operator[](id).name.data());
             if (int dirfd = open(buf, O_RDONLY | O_CLOEXEC); dirfd >= 0) {
                 close(xopenat(dirfd, "unloaded", O_CREAT | O_RDONLY, 0644));
@@ -351,7 +321,7 @@ static void get_process_info(int client, const sock_cred *cred) {
 }
 
 static void send_log_pipe(int fd) {
-    // There is race condition here, but we can't really do much about it...
+    int logd_fd = rust::get_magiskd().get_log_pipe();
     if (logd_fd >= 0) {
         write_int(fd, 0);
         send_fd(fd, logd_fd);
@@ -363,7 +333,7 @@ static void send_log_pipe(int fd) {
 static void get_moddir(int client) {
     int id = read_int(client);
     char buf[4096];
-    snprintf(buf, sizeof(buf), MODULEROOT "/%s", module_list->operator[](id).name.data());
+    ssprintf(buf, sizeof(buf), MODULEROOT "/%s", module_list->operator[](id).name.data());
     int dfd = xopen(buf, O_RDONLY | O_CLOEXEC);
     send_fd(client, dfd);
     close(dfd);

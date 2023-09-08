@@ -1,5 +1,6 @@
 #pragma once
 
+#include <sys/mman.h>
 #include <stdint.h>
 #include <jni.h>
 #include <vector>
@@ -26,16 +27,15 @@ enum : int {
 #define ZLOGD(...) LOGD("zygisk64: " __VA_ARGS__)
 #define ZLOGE(...) LOGE("zygisk64: " __VA_ARGS__)
 #define ZLOGI(...) LOGI("zygisk64: " __VA_ARGS__)
+#define ZLOGW(...) LOGW("zygisk64: " __VA_ARGS__)
 #define HIJACK_BIN HIJACK_BIN64
 #else
 #define ZLOGD(...) LOGD("zygisk32: " __VA_ARGS__)
 #define ZLOGE(...) LOGE("zygisk32: " __VA_ARGS__)
 #define ZLOGI(...) LOGI("zygisk32: " __VA_ARGS__)
+#define ZLOGW(...) LOGW("zygisk32: " __VA_ARGS__)
 #define HIJACK_BIN HIJACK_BIN32
 #endif
-
-// Find the memory address + size of the pages matching name + inode
-std::pair<void*, size_t> find_map_range(const char *name, unsigned long inode);
 
 // Unmap all pages matching the name
 void unmap_all(const char *name);

@@ -7,8 +7,8 @@ import androidx.lifecycle.MutableLiveData
 import com.topjohnwu.magisk.R
 import com.topjohnwu.magisk.core.base.BaseService
 import com.topjohnwu.magisk.core.di.ServiceLocator
+import com.topjohnwu.magisk.core.ktx.synchronized
 import com.topjohnwu.magisk.core.utils.ProgressInputStream
-import com.topjohnwu.magisk.ktx.synchronized
 import com.topjohnwu.magisk.view.Notifications
 import okhttp3.ResponseBody
 import java.io.InputStream
@@ -19,6 +19,8 @@ open class NotificationService : BaseService() {
     protected val hasNotifications get() = notifications.isNotEmpty()
 
     protected val service get() = ServiceLocator.networkService
+
+    private var attachedNotificationId = 0
 
     override fun onTaskRemoved(rootIntent: Intent?) {
         super.onTaskRemoved(rootIntent)
@@ -74,32 +76,44 @@ open class NotificationService : BaseService() {
         subject.pendingIntent(this)?.let { intent -> it.setContentIntent(intent) }
     }
 
-    private fun updateForegroundState() {
+    private fun attachNotification(id: Int, notification: Notification) {
+        attachedNotificationId = id
+        startForeground(id, notification)
+    }
+
+    private fun maybeDetachNotification(id: Int) : Boolean {
+        if (attachedNotificationId != id) return false
         if (hasNotifications) {
-            val (id, notification) = notifications.entries.first()
-            startForeground(id, notification.build())
-        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            stopForeground(STOP_FOREGROUND_DETACH)
+            val (anotherId, notification) = notifications.entries.first()
+            // Attaching a new notification will remove the current showing one
+            attachNotification(anotherId, notification.build())
+            return true
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
         } else {
             @Suppress("DEPRECATION")
-            stopForeground(false)
+            stopForeground(true)
         }
+        attachedNotificationId = 0
+        return true
     }
 
     protected fun notifyUpdate(id: Int, editor: (Notification.Builder) -> Unit = {}) {
         fun create() = Notifications.startProgress("")
 
         val wasEmpty = !hasNotifications
-        val notification = notifications.getOrPut(id, ::create).also(editor)
+        val notification = notifications.getOrPut(id, ::create).also(editor).build()
         if (wasEmpty)
-            updateForegroundState()
+            attachNotification(id, notification)
         else
-            Notifications.mgr.notify(id, notification.build())
+            Notifications.mgr.notify(id, notification)
     }
 
     protected fun notifyRemove(id: Int): Notification.Builder? {
-        val n = notifications.remove(id)?.also { updateForegroundState() }
-        Notifications.mgr.cancel(id)
+        val n = notifications.remove(id)
+        if (n == null || !maybeDetachNotification(id))
+            Notifications.mgr.cancel(id)
         return n
     }
 

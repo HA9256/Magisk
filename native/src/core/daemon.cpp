@@ -8,10 +8,7 @@
 #include <daemon.hpp>
 #include <selinux.hpp>
 #include <db.hpp>
-#include <resetprop.hpp>
 #include <flags.h>
-
-#include <core-rs.cpp>
 
 #include "core.hpp"
 
@@ -21,7 +18,6 @@ int SDK_INT = -1;
 string MAGISKTMP;
 
 bool RECOVERY_MODE = false;
-int DAEMON_STATE = STATE_NONE;
 
 static struct stat self_st;
 
@@ -89,7 +85,7 @@ static void poll_ctrl_handler(pollfd *pfd) {
     int code = read_int(pfd->fd);
     switch (code) {
     case POLL_CTRL_NEW: {
-        pollfd new_fd;
+        pollfd new_fd{};
         poll_callback cb;
         xxread(pfd->fd, &new_fd, sizeof(new_fd));
         xxread(pfd->fd, &cb, sizeof(cb));
@@ -102,6 +98,8 @@ static void poll_ctrl_handler(pollfd *pfd) {
         unregister_poll(fd, auto_close);
         break;
     }
+    default:
+        __builtin_unreachable();
     }
 }
 
@@ -143,27 +141,23 @@ static void handle_request_async(int client, int code, const sock_cred &cred) {
     case MainRequest::SUPERUSER:
         su_daemon_handler(client, &cred);
         break;
-    case MainRequest::POST_FS_DATA:
-        post_fs_data(client);
-        break;
-    case MainRequest::LATE_START:
-        late_start(client);
-        break;
-    case MainRequest::BOOT_COMPLETE:
-        boot_complete(client);
-        break;
     case MainRequest::ZYGOTE_RESTART:
-        zygote_restart(client);
+        close(client);
+        LOGI("** zygote restarted\n");
+        pkg_xml_ino = 0;
+        prune_su_access();
         break;
     case MainRequest::SQLITE_CMD:
         exec_sql(client);
         break;
-    case MainRequest::REMOVE_MODULES:
+    case MainRequest::REMOVE_MODULES: {
+        int do_reboot = read_int(client);
         remove_modules();
         write_int(client, 0);
         close(client);
-        reboot();
+        if (do_reboot) reboot();
         break;
+    }
     case MainRequest::ZYGISK:
     case MainRequest::ZYGISK_PASSTHROUGH:
         zygisk_handler(client, &cred);
@@ -185,11 +179,8 @@ static void handle_request_sync(int client, int code) {
     case MainRequest::CHECK_VERSION_CODE:
         write_int(client, MAGISK_VER_CODE);
         break;
-    case MainRequest::GET_PATH:
-        write_string(client, MAGISKTMP.data());
-        break;
     case MainRequest::START_DAEMON:
-        setup_logfile(true);
+        rust::get_magiskd().setup_logfile();
         break;
     case MainRequest::STOP_DAEMON:
         denylist_handler(-1, nullptr);
@@ -232,7 +223,9 @@ static void handle_request(pollfd *pfd) {
     }
 
     code = read_int(client);
-    if (code < 0 || code >= MainRequest::END || code == MainRequest::_SYNC_BARRIER_) {
+    if (code < 0 || code >= MainRequest::END ||
+        code == MainRequest::_SYNC_BARRIER_ ||
+        code == MainRequest::_STAGE_BARRIER_) {
         // Unknown request code
         goto done;
     }
@@ -244,7 +237,6 @@ static void handle_request(pollfd *pfd) {
     case MainRequest::BOOT_COMPLETE:
     case MainRequest::ZYGOTE_RESTART:
     case MainRequest::SQLITE_CMD:
-    case MainRequest::GET_PATH:
     case MainRequest::DENYLIST:
     case MainRequest::STOP_DAEMON:
         if (!is_root) {
@@ -274,10 +266,11 @@ static void handle_request(pollfd *pfd) {
     if (code < MainRequest::_SYNC_BARRIER_) {
         handle_request_sync(client, code);
         goto done;
+    } else if (code < MainRequest::_STAGE_BARRIER_) {
+        exec_task([=] { handle_request_async(client, code, cred); });
+    } else {
+        exec_task([=] { boot_stage_handler(client, code); });
     }
-
-    // Handle async requests in another thread
-    exec_task([=] { handle_request_async(client, code, cred); });
     return;
 
 done:
@@ -286,19 +279,19 @@ done:
 
 static void switch_cgroup(const char *cgroup, int pid) {
     char buf[32];
-    snprintf(buf, sizeof(buf), "%s/cgroup.procs", cgroup);
+    ssprintf(buf, sizeof(buf), "%s/cgroup.procs", cgroup);
     if (access(buf, F_OK) != 0)
         return;
     int fd = xopen(buf, O_WRONLY | O_APPEND | O_CLOEXEC);
     if (fd == -1)
         return;
-    snprintf(buf, sizeof(buf), "%d\n", pid);
+    ssprintf(buf, sizeof(buf), "%d\n", pid);
     xwrite(fd, buf, strlen(buf));
     close(fd);
 }
 
 static void daemon_entry() {
-    magisk_logging();
+    android_logging();
 
     // Block all signals
     sigset_t block_set;
@@ -319,9 +312,9 @@ static void daemon_entry() {
         close(fd);
 
     setsid();
-    setcon("u:r:" SEPOL_PROC_DOMAIN ":s0");
+    setcon(MAGISK_PROC_CON);
 
-    start_log_daemon();
+    rust::daemon_entry();
 
     LOGI(NAME_WITH_VER(Magisk) " daemon started\n");
 
@@ -330,7 +323,7 @@ static void daemon_entry() {
     switch_cgroup("/acct", pid);
     switch_cgroup("/dev/cg2_bpf", pid);
     switch_cgroup("/sys/fs/cgroup", pid);
-    if (getprop("ro.config.per_app_memcg") != "false") {
+    if (get_prop("ro.config.per_app_memcg") != "false") {
         switch_cgroup("/dev/memcg/apps", pid);
     }
 
@@ -350,7 +343,7 @@ static void daemon_entry() {
     });
     if (SDK_INT < 0) {
         // In case some devices do not store this info in build.prop, fallback to getprop
-        auto sdk = getprop("ro.build.version.sdk");
+        auto sdk = get_prop("ro.build.version.sdk");
         if (!sdk.empty()) {
             SDK_INT = parse_int(sdk);
         }
@@ -359,7 +352,7 @@ static void daemon_entry() {
 
     restore_tmpcon();
 
-    // SAR cleanups
+    // Cleanups
     auto mount_list = MAGISKTMP + "/" ROOTMNT;
     if (access(mount_list.data(), F_OK) == 0) {
         file_readline(true, mount_list.data(), [](string_view line) -> bool {
@@ -367,10 +360,14 @@ static void daemon_entry() {
             return true;
         });
     }
+    if (getenv("REMOUNT_ROOT")) {
+        xmount(nullptr, "/", nullptr, MS_REMOUNT | MS_RDONLY, nullptr);
+        unsetenv("REMOUNT_ROOT");
+    }
     rm_rf((MAGISKTMP + "/" ROOTOVL).data());
 
     // Load config status
-    auto config = MAGISKTMP + "/" INTLROOT "/config";
+    auto config = MAGISKTMP + "/" MAIN_CONFIG;
     parse_prop_file(config.data(), [](auto key, auto val) -> bool {
         if (key == "RECOVERYMODE" && val == "true")
             RECOVERY_MODE = true;
@@ -392,11 +389,14 @@ static void daemon_entry() {
         }
     }
 
-    sockaddr_un sun{};
-    socklen_t len = setup_sockaddr(&sun, MAIN_SOCKET);
     fd = xsocket(AF_LOCAL, SOCK_STREAM | SOCK_CLOEXEC, 0);
-    if (xbind(fd, (sockaddr *) &sun, len))
+    sockaddr_un addr = {.sun_family = AF_LOCAL};
+    strcpy(addr.sun_path, (MAGISKTMP + "/" MAIN_SOCKET).data());
+    unlink(addr.sun_path);
+    if (xbind(fd, (sockaddr *) &addr, sizeof(addr)))
         exit(1);
+    chmod(addr.sun_path, 0666);
+    setfilecon(addr.sun_path, MAGISK_FILE_CON);
     xlisten(fd, 10);
 
     default_new(poll_map);
@@ -411,11 +411,28 @@ static void daemon_entry() {
     poll_loop();
 }
 
+string find_magisk_tmp() {
+    if (access("/debug_ramdisk/" INTLROOT, F_OK) == 0) {
+        return "/debug_ramdisk";
+    }
+    if (access("/sbin/" INTLROOT, F_OK) == 0) {
+        return "/sbin";
+    }
+    // Fallback to lookup from mountinfo for manual mount, e.g. avd
+    for (const auto &mount: parse_mount_info("self")) {
+        if (mount.source == "magisk" && mount.root == "/") {
+            return mount.target;
+        }
+    }
+    return "";
+}
+
 int connect_daemon(int req, bool create) {
-    sockaddr_un sun{};
-    socklen_t len = setup_sockaddr(&sun, MAIN_SOCKET);
-    int fd = xsocket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
-    if (connect(fd, (sockaddr *) &sun, len)) {
+    int fd = xsocket(AF_LOCAL, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    sockaddr_un addr = {.sun_family = AF_LOCAL};
+    string tmp = find_magisk_tmp();
+    strcpy(addr.sun_path, (tmp + "/" MAIN_SOCKET).data());
+    if (connect(fd, (sockaddr *) &addr, sizeof(addr))) {
         if (!create || getuid() != AID_ROOT) {
             LOGE("No daemon is currently running!\n");
             close(fd);
@@ -424,8 +441,8 @@ int connect_daemon(int req, bool create) {
 
         char buf[64];
         xreadlink("/proc/self/exe", buf, sizeof(buf));
-        if (str_starts(buf, "/system/bin/")) {
-            LOGE("Start daemon on /dev or /sbin\n");
+        if (tmp.empty() || !str_starts(buf, tmp)) {
+            LOGE("Start daemon on magisk tmpfs\n");
             close(fd);
             return -1;
         }
@@ -435,7 +452,7 @@ int connect_daemon(int req, bool create) {
             daemon_entry();
         }
 
-        while (connect(fd, (struct sockaddr *) &sun, len))
+        while (connect(fd, (sockaddr *) &addr, sizeof(addr)))
             usleep(10000);
     }
     write_int(fd, req);
@@ -447,12 +464,15 @@ int connect_daemon(int req, bool create) {
         break;
     case MainResponse::ERROR:
         LOGE("Daemon error\n");
+        close(fd);
         return -1;
     case MainResponse::ROOT_REQUIRED:
         LOGE("Root is required for this operation\n");
+        close(fd);
         return -1;
     case MainResponse::ACCESS_DENIED:
         LOGE("Access denied\n");
+        close(fd);
         return -1;
     default:
         __builtin_unreachable();
